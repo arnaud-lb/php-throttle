@@ -12,7 +12,7 @@
   | obtain it through the world-wide-web, please send a note to          |
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
-  | Author:                                                              |
+  | Author: Arnaud Le Blanc <arnaud.lb@gmail.com>                        |
   +----------------------------------------------------------------------+
 */
 
@@ -26,10 +26,12 @@
 #include "php_ini.h"
 #include "ext/standard/info.h"
 #include "php_throttle.h"
+#include "rfc1867.h"
 
-/* If you declare any globals in php_throttle.h uncomment this:
-ZEND_DECLARE_MODULE_GLOBALS(throttle)
-*/
+ZEND_DECLARE_MODULE_GLOBALS(throttle);
+
+static int php_throttle_rfc1867_callback(unsigned int event, void *event_data, void **extra TSRMLS_DC);
+static int (*php_throttle_rfc1867_orig_callback)(unsigned int event, void *event_data, void **extra TSRMLS_DC);
 
 /* True global resources - no need for thread safety here */
 static int le_throttle;
@@ -39,7 +41,6 @@ static int le_throttle;
  * Every user visible function must have an entry in throttle_functions[].
  */
 const zend_function_entry throttle_functions[] = {
-	PHP_FE(confirm_throttle_compiled,	NULL)		/* For testing, remove later. */
 	{NULL, NULL, NULL}	/* Must be the last line in throttle_functions[] */
 };
 /* }}} */
@@ -54,11 +55,11 @@ zend_module_entry throttle_module_entry = {
 	throttle_functions,
 	PHP_MINIT(throttle),
 	PHP_MSHUTDOWN(throttle),
-	PHP_RINIT(throttle),		/* Replace with NULL if there's nothing to do at request start */
-	PHP_RSHUTDOWN(throttle),	/* Replace with NULL if there's nothing to do at request end */
+	NULL,
+	NULL,
 	PHP_MINFO(throttle),
 #if ZEND_MODULE_API_NO >= 20010901
-	"0.1", /* Replace with version number for your extension */
+	"0.1",
 #endif
 	STANDARD_MODULE_PROPERTIES
 };
@@ -70,32 +71,29 @@ ZEND_GET_MODULE(throttle)
 
 /* {{{ PHP_INI
  */
-/* Remove comments and fill if you need to have entries in php.ini
 PHP_INI_BEGIN()
-    STD_PHP_INI_ENTRY("throttle.global_value",      "42", PHP_INI_ALL, OnUpdateLong, global_value, zend_throttle_globals, throttle_globals)
-    STD_PHP_INI_ENTRY("throttle.global_string", "foobar", PHP_INI_ALL, OnUpdateString, global_string, zend_throttle_globals, throttle_globals)
+    STD_PHP_INI_ENTRY("throttle.speed",		"0", PHP_INI_SYSTEM, OnUpdateLong, speed, zend_throttle_globals, throttle_globals)
+    STD_PHP_INI_ENTRY("throttle.debug",		"0", PHP_INI_SYSTEM, OnUpdateBool, debug, zend_throttle_globals, throttle_globals)
 PHP_INI_END()
-*/
 /* }}} */
 
 /* {{{ php_throttle_init_globals
  */
-/* Uncomment this function if you have INI entries
 static void php_throttle_init_globals(zend_throttle_globals *throttle_globals)
 {
-	throttle_globals->global_value = 0;
-	throttle_globals->global_string = NULL;
+	memset(throttle_globals, 0, sizeof(*throttle_globals));
 }
-*/
 /* }}} */
 
 /* {{{ PHP_MINIT_FUNCTION
  */
 PHP_MINIT_FUNCTION(throttle)
 {
-	/* If you have INI entries, uncomment these lines 
 	REGISTER_INI_ENTRIES();
-	*/
+
+	php_throttle_rfc1867_orig_callback = php_rfc1867_callback;
+	php_rfc1867_callback = php_throttle_rfc1867_callback;
+
 	return SUCCESS;
 }
 /* }}} */
@@ -104,27 +102,7 @@ PHP_MINIT_FUNCTION(throttle)
  */
 PHP_MSHUTDOWN_FUNCTION(throttle)
 {
-	/* uncomment this line if you have INI entries
 	UNREGISTER_INI_ENTRIES();
-	*/
-	return SUCCESS;
-}
-/* }}} */
-
-/* Remove if there's nothing to do at request start */
-/* {{{ PHP_RINIT_FUNCTION
- */
-PHP_RINIT_FUNCTION(throttle)
-{
-	return SUCCESS;
-}
-/* }}} */
-
-/* Remove if there's nothing to do at request end */
-/* {{{ PHP_RSHUTDOWN_FUNCTION
- */
-PHP_RSHUTDOWN_FUNCTION(throttle)
-{
 	return SUCCESS;
 }
 /* }}} */
@@ -137,40 +115,108 @@ PHP_MINFO_FUNCTION(throttle)
 	php_info_print_table_header(2, "throttle support", "enabled");
 	php_info_print_table_end();
 
-	/* Remove comments if you have entries in php.ini
 	DISPLAY_INI_ENTRIES();
-	*/
 }
 /* }}} */
 
-
-/* Remove the following function when you have succesfully modified config.m4
-   so that your module can be compiled into PHP, it exists only for testing
-   purposes. */
-
-/* Every user-visible function in PHP should document itself in the source */
-/* {{{ proto string confirm_throttle_compiled(string arg)
-   Return a string to confirm that the module is compiled in */
-PHP_FUNCTION(confirm_throttle_compiled)
+static void throttle_debug(const char *format, ...)
 {
-	char *arg = NULL;
-	int arg_len, len;
-	char *strg;
+	char *buf = NULL;
+	va_list ap;
 
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &arg, &arg_len) == FAILURE) {
+	if (!THROTTLE_G(debug)) {
 		return;
 	}
 
-	len = spprintf(&strg, 0, "Congratulations! You have successfully modified ext/%.78s/config.m4. Module %.78s is now compiled into PHP.", "throttle", arg);
-	RETURN_STRINGL(strg, len, 0);
-}
-/* }}} */
-/* The previous line is meant for vim and emacs, so it can correctly fold and 
-   unfold functions in source code. See the corresponding marks just before 
-   function definition, where the functions purpose is also documented. Please 
-   follow this convention for the convenience of others editing your code.
-*/
+	va_start(ap, format);
+	vspprintf(&buf, 0, format, ap);
+	va_end(ap);
 
+	sapi_module.log_message(buf);
+	efree(buf);
+}
+
+static void throttle_wait(size_t total_bytes_processed)
+{
+	struct timeval tv;
+	double time;
+	double min_time;
+	size_t bytes_processed;
+	
+	bytes_processed = total_bytes_processed - THROTTLE_G(post_bytes_processed);
+
+	throttle_debug("throttle: bytes processed: %zd (total: %zd)\n", bytes_processed, total_bytes_processed);
+
+	min_time = (double) bytes_processed / (double) THROTTLE_G(speed);
+
+	gettimeofday(&tv, NULL);
+	time = (double) tv.tv_sec + tv.tv_usec / 1000000.0;
+
+	if (time < THROTTLE_G(lasttime) + min_time) {
+
+		useconds_t usec;
+
+		throttle_debug("throttle: waiting for %f seconds (until %f)\n", THROTTLE_G(lasttime) + min_time - time, THROTTLE_G(lasttime) + min_time);
+
+		usec = (THROTTLE_G(lasttime) + min_time - time) * 1000000.0;
+		usleep(usec);
+
+		gettimeofday(&tv, NULL);
+		time = (double) tv.tv_sec + tv.tv_usec / 1000000.0;
+	}
+
+	THROTTLE_G(post_bytes_processed) = total_bytes_processed;
+	THROTTLE_G(lasttime) = time;
+}
+
+static int php_throttle_rfc1867_callback(unsigned int event, void *event_data, void **extra TSRMLS_DC)
+{
+	int retval = SUCCESS;
+
+	if (php_throttle_rfc1867_orig_callback) {
+		retval = php_throttle_rfc1867_orig_callback(event, event_data, extra TSRMLS_CC);
+	}
+	if (THROTTLE_G(speed) < 1) {
+		return retval;
+	}
+
+	switch(event) {
+	case MULTIPART_EVENT_START: {
+		struct timeval tv;
+		gettimeofday(&tv, NULL);
+		THROTTLE_G(lasttime) = (double) tv.tv_sec + tv.tv_usec / 1000000.0;
+		THROTTLE_G(post_bytes_processed) = 0;
+		break;
+	}
+	case MULTIPART_EVENT_FORMDATA: {
+		multipart_event_formdata *data = (multipart_event_formdata *) event_data;
+		throttle_wait(data->post_bytes_processed);
+		break;
+	}
+	case MULTIPART_EVENT_FILE_START: {
+		multipart_event_file_start *data = (multipart_event_file_start *) event_data;
+		throttle_wait(data->post_bytes_processed);
+		break;
+	}
+	case MULTIPART_EVENT_FILE_DATA: {
+		multipart_event_file_data *data = (multipart_event_file_data *) event_data;
+		throttle_wait(data->post_bytes_processed);
+		break;
+	}
+	case MULTIPART_EVENT_FILE_END: {
+		multipart_event_file_end *data = (multipart_event_file_end *) event_data;
+		throttle_wait(data->post_bytes_processed);
+		break;
+	}
+	case MULTIPART_EVENT_END: {
+		multipart_event_end *data = (multipart_event_end *) event_data;
+		throttle_wait(data->post_bytes_processed);
+		break;
+	}
+	}
+
+	return retval;
+}
 
 /*
  * Local variables:
