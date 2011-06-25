@@ -72,8 +72,8 @@ ZEND_GET_MODULE(throttle)
 /* {{{ PHP_INI
  */
 PHP_INI_BEGIN()
-    STD_PHP_INI_ENTRY("throttle.speed",		"0", PHP_INI_SYSTEM, OnUpdateLong, speed, zend_throttle_globals, throttle_globals)
-    STD_PHP_INI_ENTRY("throttle.debug",		"0", PHP_INI_SYSTEM, OnUpdateBool, debug, zend_throttle_globals, throttle_globals)
+    STD_PHP_INI_ENTRY("throttle.speed",		"0", PHP_INI_PERDIR, OnUpdateLong, speed, zend_throttle_globals, throttle_globals)
+    STD_PHP_INI_ENTRY("throttle.debug",		"0", PHP_INI_PERDIR, OnUpdateBool, debug, zend_throttle_globals, throttle_globals)
 PHP_INI_END()
 /* }}} */
 
