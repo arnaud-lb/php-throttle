@@ -123,6 +123,7 @@ static void throttle_debug(const char *format, ...)
 {
 	char *buf = NULL;
 	va_list ap;
+	TSRMLS_FETCH();
 
 	if (!THROTTLE_G(debug)) {
 		return;
@@ -132,11 +133,11 @@ static void throttle_debug(const char *format, ...)
 	vspprintf(&buf, 0, format, ap);
 	va_end(ap);
 
-	sapi_module.log_message(buf);
+	sapi_module.log_message(buf TSRMLS_CC);
 	efree(buf);
 }
 
-static void throttle_wait(size_t total_bytes_processed)
+static void throttle_wait(size_t total_bytes_processed TSRMLS_DC)
 {
 	struct timeval tv;
 	double time;
@@ -190,27 +191,27 @@ static int php_throttle_rfc1867_callback(unsigned int event, void *event_data, v
 	}
 	case MULTIPART_EVENT_FORMDATA: {
 		multipart_event_formdata *data = (multipart_event_formdata *) event_data;
-		throttle_wait(data->post_bytes_processed);
+		throttle_wait(data->post_bytes_processed TSRMLS_CC);
 		break;
 	}
 	case MULTIPART_EVENT_FILE_START: {
 		multipart_event_file_start *data = (multipart_event_file_start *) event_data;
-		throttle_wait(data->post_bytes_processed);
+		throttle_wait(data->post_bytes_processed TSRMLS_CC);
 		break;
 	}
 	case MULTIPART_EVENT_FILE_DATA: {
 		multipart_event_file_data *data = (multipart_event_file_data *) event_data;
-		throttle_wait(data->post_bytes_processed);
+		throttle_wait(data->post_bytes_processed TSRMLS_CC);
 		break;
 	}
 	case MULTIPART_EVENT_FILE_END: {
 		multipart_event_file_end *data = (multipart_event_file_end *) event_data;
-		throttle_wait(data->post_bytes_processed);
+		throttle_wait(data->post_bytes_processed TSRMLS_CC);
 		break;
 	}
 	case MULTIPART_EVENT_END: {
 		multipart_event_end *data = (multipart_event_end *) event_data;
-		throttle_wait(data->post_bytes_processed);
+		throttle_wait(data->post_bytes_processed TSRMLS_CC);
 		break;
 	}
 	}
